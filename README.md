@@ -1,32 +1,34 @@
-# Networked-Producer-and-Consumer
+# Media Upload Producer-Consumer System
 
-Here's a producer-consumer exercise involving file writes and network sockets. This will help you practice concurrent programming, file I/O, queueing, and network communication.  This is a simple simulation of a media upload service.
+This is a producer-consumer system for uploading videos using gRPC, with compression, duplicate detection, and a web-based GUI.
 
-There are two main components
+## Components
 
-1) Producer: Reads the a video file, uploads it to the media upload service (consumer).
-2) Consumer:  Accepts simultaneous media uploads.  Saves the uploaded videos to a single folder. Displays and previews the 10 seconds of the uploaded video file.
-3) gRPC: Communication component between the produce and consumer.
+- **Producer**: Reads video files from separate folders and uploads them to the consumer via gRPC.
+- **Consumer**: Receives uploads, compresses videos, detects duplicates, and provides a web GUI to view videos.
+- **gRPC**: Communication between producers and consumers.
 
-Both the producer and consumer runs on a diffrent virtual machine and communicate with each other via the network / sockets.
-Input
+## Features
 
-The program accepts inputs from the user.
+- Leaky bucket queue: Drops uploads when queue is full.
+- Duplicate detection using MD5 hash.
+- Video compression using FFmpeg.
+- Web GUI: Lists videos, previews first 10 seconds on hover, plays full video on click.
 
-p - Number of producer threads / instances.  Each thread must read from a separate folder containing the videos.
+## Setup
 
-c - Number of consumer threads
+1. Install dependencies: `npm install`
+2. Run the system: `node run.js p c q`
 
-q - max queue lenght.  For simplicity we will use a leaky bucket design, additional videos beyond the queue capacity will be dropped.
-Output
+   - p: Number of producers (creates producer1, producer2, ..., producerP folders)
+   - c: Number of consumers (runs c server instances on ports 50051, 50052, etc.)
+   - q: Max queue length per consumer
 
-The output of the program should show the following:
+3. Place video files in the producer folders (e.g., producer1/video.mp4).
+4. Open browser to `http://localhost:3000` for the GUI.
 
-1) The consumer has a GUI (can be window or browser based)
-2) The GUI will show the uploaded videos, preview the 10 seconds of the video on mouse hover.
-3) Display the video on click.
-Bonus
+## For Multiple VMs
 
-1) The consumer program can tell the producer processes that the queue is full.
-2) Duplicate detection.
-3) Video compression.
+- Run consumers on VMs: `node consumer.js port q` (e.g., port 50051 on one VM, 50052 on another)
+- Run producers on VMs: `node producer.js folder server_address`
+  - e.g., `node producer.js producer1 192.168.1.100:50051`
