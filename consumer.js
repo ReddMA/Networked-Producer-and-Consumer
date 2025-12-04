@@ -8,6 +8,16 @@ const ffmpegPath = require('ffmpeg-static');
 ffmpeg.setFfmpegPath(ffmpegPath);
 const express = require('express');
 const { exec } = require('child_process');
+const async = require('async');
+
+const clients = [];
+let producerIndex = 0;
+
+function sendToClients(type, data) {
+  clients.forEach(client => {
+    client.res.write(`data: ${JSON.stringify({ type, data })}\n\n`);
+  });
+}
 
 const PROTO_PATH = './media.proto';
 
@@ -30,10 +40,12 @@ if (!fs.existsSync(COMPRESSED_DIR)) fs.mkdirSync(COMPRESSED_DIR);
 if (!fs.existsSync(PREVIEW_DIR)) fs.mkdirSync(PREVIEW_DIR);
 
 class Consumer {
-  constructor(maxQueue) {
-    this.queue = [];
+  constructor(maxQueue, concurrency) {
     this.maxQueue = maxQueue;
     this.duplicates = new Set();
+    this.queue = async.queue(this.processVideo.bind(this), concurrency);
+    this.processingCount = 0;
+    this.queue.drain(() => console.log('All videos processed'));
   }
 
   uploadVideo(call, callback) {
@@ -48,8 +60,8 @@ class Consumer {
     });
 
     call.on('end', () => {
-      if (this.queue.length >= this.maxQueue) {
-        callback(null, { status: 'error', message: 'Queue full' });
+      if (this.queue.length() >= this.maxQueue) {
+        callback(null, { status: 'queue_full', message: 'Queue full' });
         return;
       }
 
@@ -60,45 +72,62 @@ class Consumer {
 
       this.duplicates.add(hash);
       this.queue.push({ filename, data: Buffer.concat(chunks), hash });
-      this.processQueue();
+      this.processingCount++;
+      sendToClients('queue', { size: this.processingCount, full: this.queue.length() >= this.maxQueue });
       callback(null, { status: 'success', message: 'Video uploaded' });
     });
   }
 
   getQueueStatus(call, callback) {
-    callback(null, { full: this.queue.length >= this.maxQueue, current_size: this.queue.length });
+    callback(null, { full: this.queue.length() >= this.maxQueue, current_size: this.queue.length() });
   }
 
-  processQueue() {
-    if (this.queue.length === 0) return;
-
-    const video = this.queue.shift();
+  processVideo(video, callback) {
     const uploadPath = path.join(UPLOAD_DIR, video.filename);
     fs.writeFileSync(uploadPath, video.data);
+    console.log(`Saved ${video.filename} to uploads`);
 
-    // Compress
-    const compressedPath = path.join(COMPRESSED_DIR, video.filename);
-    ffmpeg(uploadPath)
-      .output(compressedPath)
-      .videoCodec('libx264')
-      .audioCodec('aac')
-      .size('640x480')
-      .on('end', () => {
-        console.log(`Compressed ${video.filename}`);
-        // Create preview
-        this.createPreview(compressedPath, video.filename);
-      })
-      .on('error', (err) => console.error(err))
-      .run();
+    // Simulate slow processing for testing queue
+    setTimeout(() => {
+      // Compress
+      const compressedPath = path.join(COMPRESSED_DIR, video.filename);
+      ffmpeg(uploadPath)
+        .output(compressedPath)
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .size('640x480')
+        .on('end', () => {
+          console.log(`Compressed ${video.filename}`);
+          // Create preview
+          this.createPreview(compressedPath, video.filename, callback);
+        })
+        .on('error', (err) => {
+          console.error(`Compression error for ${video.filename}:`, err);
+          callback();
+        })
+        .run(); 
+    }, 3000); // 3 second delay to simulate slow processing
   }
 
-  createPreview(videoPath, filename) {
+  createPreview(videoPath, filename, callback) {
     const previewPath = path.join(PREVIEW_DIR, filename);
     ffmpeg(videoPath)
       .output(previewPath)
       .duration(10)
-      .on('end', () => console.log(`Preview created for ${filename}`))
-      .on('error', (err) => console.error(err))
+      .on('end', () => {
+        console.log(`Preview created for ${filename}`);
+        callback();
+        this.processingCount--;
+        sendToClients('queue', { size: this.processingCount, full: this.queue.length() >= this.maxQueue });
+        fs.readdir(COMPRESSED_DIR, (err, files) => {
+          if (!err) sendToClients('videos', files);
+        });
+      })
+      .on('error', (err) => {
+        console.error(`Preview error for ${filename}:`, err);
+        callback();
+        this.processingCount--;
+      })
       .run();
   }
 }
@@ -109,7 +138,7 @@ function startGRPCServer(consumer, port) {
     UploadVideo: consumer.uploadVideo.bind(consumer),
     GetQueueStatus: consumer.getQueueStatus.bind(consumer)
   });
-  server.bindAsync(`127.0.0.1:${port}`, grpc.ServerCredentials.createInsecure(), () => {
+  server.bindAsync(`0.0.0.0:${port}`, grpc.ServerCredentials.createInsecure(), () => {
     console.log(`gRPC server running on port ${port}`);
     server.start();
   });
@@ -117,57 +146,72 @@ function startGRPCServer(consumer, port) {
 
 function startWebServer(port) {
   const app = express();
-  app.use(express.static(PREVIEW_DIR));
+  app.use(express.static(path.join(__dirname, 'public')));
   app.use('/videos', express.static(COMPRESSED_DIR));
+  app.use('/previews', express.static(PREVIEW_DIR));
+
+  app.get('/api/videos', (req, res) => {
+    fs.readdir(COMPRESSED_DIR, (err, files) => {
+      if (err) return res.status(500).json({ error: 'Failed to read videos' });
+      res.json(files);
+    });
+  });
+
+  app.get('/api/queue', (req, res) => {
+    res.json({ full: consumer.queue.length() >= consumer.maxQueue, size: consumer.processingCount });
+  });
+
+  app.post('/upload', (req, res) => {
+    const filename = req.headers['x-filename'];
+    if (!filename) return res.status(400).send('Missing filename');
+    // Assign to producer folders round-robin
+    producerIndex = (producerIndex + 1) % numProducers;
+    const producerFolder = `producer${producerIndex + 1}`;
+    const folderPath = path.join(__dirname, producerFolder);
+    if (!fs.existsSync(folderPath)) {
+      fs.mkdirSync(folderPath);
+    }
+    const filepath = path.join(folderPath, filename);
+    const writer = fs.createWriteStream(filepath);
+    req.on('error', (err) => {
+      console.error('Upload error:', err);
+      res.status(500).send('Upload failed');
+    });
+    writer.on('finish', () => {
+      console.log(`File uploaded via web to ${producerFolder}: ${filename}`);
+      res.send('Uploaded successfully');
+    });
+    req.pipe(writer);
+  });
+
+  app.get('/events', (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
+    const client = { res };
+    clients.push(client);
+    req.on('close', () => {
+      clients.splice(clients.indexOf(client), 1);
+    });
+  });
 
   app.get('/', (req, res) => {
-    fs.readdir(COMPRESSED_DIR, (err, files) => {
-      if (err) return res.send('Error');
-      const html = `
-        <html>
-        <head><title>Media Consumer</title></head>
-        <body>
-          <h1>Uploaded Videos</h1>
-          <div id="videos"></div>
-          <script>
-            const videos = ${JSON.stringify(files)};
-            const container = document.getElementById('videos');
-            videos.forEach(file => {
-              const div = document.createElement('div');
-              div.innerHTML = \`
-                <video id="vid-\${file}" width="320" height="240" muted>
-                  <source src="\${file}" type="video/mp4">
-                </video>
-                <br><button onclick="playFull('\${file}')">\${file}</button>
-              \`;
-              container.appendChild(div);
-              const video = document.getElementById(\`vid-\${file}\`);
-              video.onmouseover = () => video.play();
-              video.onmouseout = () => { video.pause(); video.currentTime = 0; };
-            });
-            function playFull(file) {
-              window.open(\`/videos/\${file}\`);
-            }
-          </script>
-        </body>
-        </html>
-      `;
-      res.send(html);
-    });
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 
   app.listen(port, () => console.log(`Web server running on port ${port}`));
 }
 
 const args = process.argv.slice(2);
-const port = parseInt(args[0]) || 50051; // gRPC port
+const c = parseInt(args[0]) || 1; // concurrency (workers)
 const q = parseInt(args[1]) || 10; // queue
+const numProducers = parseInt(args[2]) || 2; // number of producers
 
-const consumer = new Consumer(q);
+const consumer = new Consumer(q, c);
 
-startGRPCServer(consumer, port);
-if (port === 50051) {
-  startWebServer(3000);
-}
+startGRPCServer(consumer, 50051);
+startWebServer(3000);
 
 // For multiple consumers, perhaps run multiple instances, but for simplicity, one server handles multiple uploads

@@ -110,6 +110,6 @@ function startProducer(folderPath, serverAddress = 'localhost:50051') {
 
 const args = process.argv.slice(2);
 const folder = path.resolve(args[0] || './producer1');
-const server = args[1] || 'localhost:50051';
+const server = args[1] || 'localhost:50051'; // always 50051 for single port
 
 startProducer(folder, server);

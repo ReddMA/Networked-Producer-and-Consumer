@@ -18,17 +18,18 @@ This is a producer-consumer system for uploading videos using gRPC, with compres
 ## Setup
 
 1. Install dependencies: `npm install`
-2. Run the system: `node run.js p c q`
+2. Run the system: `npm start` or `node run.js p c q`
+3. Clean folders: `npm run clean`
 
    - p: Number of producers (creates producer1, producer2, ..., producerP folders)
-   - c: Number of consumers (runs c server instances on ports 50051, 50052, etc.)
-   - q: Max queue length per consumer
+   - c: Concurrency (number of worker threads in consumer for processing)
+   - q: Max queue length
 
-3. Place video files in the producer folders (e.g., producer1/video.mp4).
-4. Open browser to `http://localhost:3000` for the GUI.
+4. Place video files in the producer folders (e.g., producer1/video.mp4), or drag & drop videos on the web GUI (saves to producer folders round-robin).
+5. Open browser to `http://localhost:3000` for the GUI.
 
 ## For Multiple VMs
 
-- Run consumers on VMs: `node consumer.js port q` (e.g., port 50051 on one VM, 50052 on another)
-- Run producers on VMs: `node producer.js folder server_address`
+- Run consumer on one VM: `node consumer.js c q`
+- Run producers on other VMs: `node producer.js folder server_address`
   - e.g., `node producer.js producer1 192.168.1.100:50051`
