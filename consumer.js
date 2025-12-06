@@ -45,6 +45,7 @@ class Consumer {
     this.duplicates = new Set();
     this.queue = async.queue(this.processVideo.bind(this), concurrency);
     this.processingCount = 0;
+    this.pendingUploads = 0;
     this.queue.drain(() => console.log('All videos processed'));
   }
 
@@ -60,20 +61,25 @@ class Consumer {
     });
 
     call.on('end', () => {
-      if (this.queue.length() >= this.maxQueue) {
+      console.log(`Upload attempt for ${filename}, current processingCount: ${this.processingCount}, pendingUploads: ${this.pendingUploads}`);
+      if (this.pendingUploads <= 0 && this.processingCount >= this.maxQueue) {
+        console.log(`Rejected ${filename}, queue full`);
         callback(null, { status: 'queue_full', message: 'Queue full' });
         return;
       }
 
       if (this.duplicates.has(hash)) {
+        console.log(`Rejected ${filename}, duplicate`);
         callback(null, { status: 'duplicate', message: 'Video already exists' });
         return;
       }
 
       this.duplicates.add(hash);
       this.queue.push({ filename, data: Buffer.concat(chunks), hash });
+      if (this.pendingUploads > 0) this.pendingUploads--;
       this.processingCount++;
-      sendToClients('queue', { size: this.processingCount, full: this.queue.length() >= this.maxQueue });
+      console.log(`Accepted ${filename}, new processingCount: ${this.processingCount}, pendingUploads: ${this.pendingUploads}`);
+      sendToClients('queue', { size: this.processingCount, full: this.processingCount >= this.maxQueue });
       callback(null, { status: 'success', message: 'Video uploaded' });
     });
   }
@@ -105,8 +111,8 @@ class Consumer {
           console.error(`Compression error for ${video.filename}:`, err);
           callback();
         })
-        .run(); 
-    }, 3000); // 3 second delay to simulate slow processing
+        .run();
+    }, 1000); // 3 second delay for testing
   }
 
   createPreview(videoPath, filename, callback) {
@@ -158,12 +164,20 @@ function startWebServer(port) {
   });
 
   app.get('/api/queue', (req, res) => {
-    res.json({ full: consumer.queue.length() >= consumer.maxQueue, size: consumer.processingCount });
+    res.json({ full: consumer.processingCount >= consumer.maxQueue, size: consumer.processingCount });
   });
 
   app.post('/upload', (req, res) => {
     const filename = req.headers['x-filename'];
     if (!filename) return res.status(400).send('Missing filename');
+
+    // Check queue before saving
+    if (consumer.pendingUploads + consumer.processingCount >= consumer.maxQueue) {
+      console.log(`Rejected web upload ${filename}, queue full`);
+      return res.status(429).send('Queue full');
+    }
+    consumer.pendingUploads++;
+
     // Assign to producer folders round-robin
     producerIndex = (producerIndex + 1) % numProducers;
     const producerFolder = `producer${producerIndex + 1}`;
@@ -201,8 +215,7 @@ function startWebServer(port) {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 
-  app.listen(port, "0.0.0.0", () => 
-  console.log(`Web server running on 0.0.0.0:${port}`));
+  app.listen(port, "0.0.0.0", () => console.log(`Web server running on 0.0.0.0:${port}`));
 }
 
 const args = process.argv.slice(2);

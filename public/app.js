@@ -99,24 +99,28 @@ function refreshData() {
 }
 
 async function uploadFiles(files) {
+    const uploadPromises = [];
     for (const file of files) {
         if (file.type.startsWith('video/')) {
-            try {
-                const response = await fetch('/upload', {
+            uploadPromises.push(
+                fetch('/upload', {
                     method: 'POST',
                     headers: { 'X-Filename': file.name },
                     body: file
-                });
-                if (response.ok) {
-                    console.log('Uploaded', file.name);
-                } else {
-                    console.error('Upload failed for', file.name);
-                }
-            } catch (error) {
-                console.error('Error uploading', file.name, error);
-            }
+                }).then(response => {
+                    if (response.ok) {
+                        console.log('Uploaded', file.name);
+                    } else {
+                        console.error('Upload failed for', file.name);
+                        response.text().then(text => console.log('Error:', text));
+                    }
+                }).catch(error => {
+                    console.error('Error uploading', file.name, error);
+                })
+            );
         }
     }
+    await Promise.allSettled(uploadPromises);
 }
 
 // Load data on page load
