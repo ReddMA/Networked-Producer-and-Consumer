@@ -201,7 +201,8 @@ function startWebServer(port) {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 
-  app.listen(port, () => console.log(`Web server running on port ${port}`));
+  app.listen(port, "0.0.0.0", () => 
+  console.log(`Web server running on 0.0.0.0:${port}`));
 }
 
 const args = process.argv.slice(2);
